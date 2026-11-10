@@ -36,8 +36,12 @@ class RNNClassifier(nn.Module):
         return self.head(ctx).squeeze(-1)
 
 
-def train_model(model, store, tr_idx, va_idx, seq_len, epochs, lr, batch_size=1024, log=print, tag=""):
-    """RMSProp training; keeps the checkpoint with the best validation loss."""
+def train_model(model, store, tr_idx, va_idx, seq_len, epochs, lr, batch_size=1024, log=print, tag="",
+                history=None, log_every=1):
+    """RMSProp training; keeps the checkpoint with the best validation loss.
+
+    If `history` is a list, per-epoch train/val loss and accuracy are appended to it.
+    """
     opt = torch.optim.RMSprop(model.parameters(), lr=lr)
     loss_fn = nn.BCEWithLogitsLoss()
     yv = torch.from_numpy(store.y[va_idx])
@@ -45,20 +49,27 @@ def train_model(model, store, tr_idx, va_idx, seq_len, epochs, lr, batch_size=10
     for ep in range(epochs):
         model.train()
         perm = np.random.permutation(tr_idx)
-        tot = 0.0
+        tot, correct = 0.0, 0
         for i in range(0, len(perm), batch_size):
             b = perm[i:i + batch_size]
             x = torch.from_numpy(store.sequences(b, seq_len))
             y = torch.from_numpy(store.y[b])
             opt.zero_grad()
-            loss = loss_fn(model(x), y)
+            z = model(x)
+            loss = loss_fn(z, y)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             tot += loss.item() * len(b)
-        pv = predict(model, store, va_idx, seq_len, logits=True)
-        vloss = loss_fn(torch.from_numpy(pv), yv).item()
-        log(f"[{tag}] epoch {ep + 1}/{epochs} train_loss={tot / len(perm):.4f} val_loss={vloss:.4f}")
+            correct += ((z.detach() > 0).float() == y).sum().item()
+        pv = torch.from_numpy(predict(model, store, va_idx, seq_len, logits=True))
+        vloss = loss_fn(pv, yv).item()
+        vacc = ((pv > 0).float() == yv).float().mean().item()
+        if history is not None:
+            history.append({"epoch": ep + 1, "train_loss": tot / len(perm), "val_loss": vloss,
+                            "train_acc": correct / len(perm), "val_acc": vacc})
+        if (ep + 1) % log_every == 0 or ep == epochs - 1:
+            log(f"[{tag}] epoch {ep + 1}/{epochs} train_loss={tot / len(perm):.4f} val_loss={vloss:.4f} val_acc={vacc:.4f}")
         if vloss < best:
             best, best_state = vloss, {k: v.clone() for k, v in model.state_dict().items()}
     model.load_state_dict(best_state)
