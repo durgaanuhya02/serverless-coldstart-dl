@@ -1,11 +1,34 @@
 # Cold-Start Prediction & Provisioning Optimization (Azure Functions 2019)
 
-Re-implementation of the idea in *"Cold Start Prediction and Provisioning Optimization in Serverless
-Computing Using Deep Learning"* (ResearchGate 389782389). The full text was not accessible
-(ResearchGate blocks automated access), so the design below follows the title and the standard
-formulation used by the closely related work on the same trace (LSTM/Transformer invocation
-forecasting + pre-warming, compared against Azure's fixed keep-alive and the hybrid-histogram policy).
-**Once you have the PDF, check the model and metric details against it.**
+Replication of *"Cold Start Prediction and Provisioning Optimization in Serverless Computing Using
+Deep Learning"* (ODL-CSP), on the public Azure Functions 2019 trace instead of the paper's AWS Lambda data.
+
+## Main pipeline: paper replication (`run_paper.py`)
+
+Built from the paper's abstract (the methods section is still to be cross-checked):
+
+| Paper | This implementation |
+|---|---|
+| Attention-based BiGRU (ABiGRU) | `coldstart/abigru.py`: BiGRU + additive attention pooling |
+| RMSProp + hyperparameter tuning | `torch.optim.RMSprop`; `--tune` grid over lr x hidden |
+| Predict cold start of each incoming invocation | per-invocation dataset (`coldstart/events.py`); label = cold under a 10-min keep-alive; **only past invocations are used** |
+| Features: timestamp, invoke frequency, cold-start indicator, duration, previous/historical cold starts, event type, time since last cold start, consecutive cold starts | all of them, per event, over the last 16 invocations |
+| Accuracy / Precision / Recall / F1 / MCC (90.36 / 91.87 / 90.42 / 90.28 / 82.28) | same metrics, on the natural test distribution **and** a balanced test subset |
+| Provisioned concurrency ("function warmer") | warmer keeps the function provisioned 60 min instead of 10 when a cold start is predicted |
+
+Baselines: BiGRU (no attention), GRU, LSTM, logistic regression, gradient boosting, "previous call was cold".
+
+```bash
+python run_paper.py --tune --epochs 5      # outputs/paper/{classification_test,warmer_test}.csv, report.json
+```
+
+Differences from the paper to keep in mind:
+- Azure trace has per-minute counts, so an "invocation" is an active minute; cold starts are derived
+  from the keep-alive rule, not measured.
+- Only ~4.5% of invocations are cold in this trace, so accuracy is high by default. MCC/F1 and the
+  balanced-subset numbers are the fair comparison with the paper.
+
+## Earlier exploratory pipeline (`run_pipeline.py`): minute-level forecasting
 
 ## Finalized idea
 

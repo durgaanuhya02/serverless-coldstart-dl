@@ -47,9 +47,24 @@ def build_cache(cfg: Config, force: bool = False):
     trig_idx = np.array([cfg.triggers.index(t) if t in cfg.triggers else len(cfg.triggers) - 1
                          for t in triggers], dtype=np.int64)
     np.savez_compressed(path, counts=counts, trigger=trig_idx, mem_mb=mem_mb)
-    (cfg.cache_dir / "sampled_keys.json").write_text(json.dumps(keys))
+    keys_path(cfg).write_text(json.dumps(keys))
     print(f"[data] cached -> {path}")
     return load_cache(path)
+
+
+def keys_path(cfg):
+    return cfg.cache_dir / f"keys_f{cfg.n_functions}_d{cfg.n_days}_s{cfg.seed}.json"
+
+
+def load_durations(cfg):
+    """Average execution time (ms) per sampled function from day 1 (median fallback)."""
+    keys = json.loads(keys_path(cfg).read_text())
+    dur = pd.read_csv(cfg.data_dir / "function_durations_percentiles.anon.d01.csv",
+                      usecols=KEY + ["Average"])
+    dur["key"] = dur[KEY].agg("|".join, axis=1)
+    m = dur.groupby("key")["Average"].mean()
+    out = np.array([m.get(k, np.nan) for k in keys], dtype=np.float32)
+    return np.where(np.isnan(out), np.nanmedian(out), out)
 
 
 def load_cache(path):
