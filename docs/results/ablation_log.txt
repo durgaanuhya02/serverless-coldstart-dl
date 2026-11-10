@@ -1,0 +1,24 @@
+### abl_s16
+[ABiGRU s0] early stop at epoch 4 (best val_loss=0.0396)
+[result] seed=0 ABiGRU: F1=0.7881 MCC=0.7893 bal_acc=0.8415 reduction=61.14%
+[done] 117s -> C:\Users\Durga\OneDrive\Desktop\FLAM COMPANY\coldstart-dl\outputs\paper\abl_s16
+### abl_s32
+[ABiGRU s0] early stop at epoch 4 (best val_loss=0.0399)
+[result] seed=0 ABiGRU: F1=0.7864 MCC=0.7882 bal_acc=0.8395 reduction=60.83%
+[done] 284s -> C:\Users\Durga\OneDrive\Desktop\FLAM COMPANY\coldstart-dl\outputs\paper\abl_s32
+### abl_s16_daily
+[ABiGRU s0] early stop at epoch 4 (best val_loss=0.0397)
+[result] seed=0 ABiGRU: F1=0.7908 MCC=0.7915 bal_acc=0.8442 reduction=61.66%
+[done] 106s -> C:\Users\Durga\OneDrive\Desktop\FLAM COMPANY\coldstart-dl\outputs\paper\abl_s16_daily
+### abl_s32_daily
+[ABiGRU s0] early stop at epoch 4 (best val_loss=0.0399)
+[result] seed=0 ABiGRU: F1=0.7879 MCC=0.7892 bal_acc=0.8412 reduction=61.25%
+[done] 196s -> C:\Users\Durga\OneDrive\Desktop\FLAM COMPANY\coldstart-dl\outputs\paper\abl_s32_daily
+### abl_s64_daily
+[ABiGRU s0] early stop at epoch 4 (best val_loss=0.0403)
+[result] seed=0 ABiGRU: F1=0.7854 MCC=0.7873 bal_acc=0.8387 reduction=60.91%
+[done] 648s -> C:\Users\Durga\OneDrive\Desktop\FLAM COMPANY\coldstart-dl\outputs\paper\abl_s64_daily
+### abl_s32_daily_L2
+[ABiGRU s0] early stop at epoch 4 (best val_loss=0.0399)
+[result] seed=0 ABiGRU: F1=0.7825 MCC=0.7857 bal_acc=0.8349 reduction=60.34%
+[done] 650s -> C:\Users\Durga\OneDrive\Desktop\FLAM COMPANY\coldstart-dl\outputs\paper\abl_s32_daily_L2

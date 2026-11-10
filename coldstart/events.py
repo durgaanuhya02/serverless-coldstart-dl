@@ -26,7 +26,10 @@ CAP = 2880.0
 N_DYN = 10
 
 
-def function_events(c, keepalive):
+def function_events(c, keepalive, daily=True):
+    """daily=True adds two "same time yesterday" features (good for daily/timer patterns):
+    minutes from (t - 24h) to the next invocation that day (<= 24h by construction, so it never
+    looks past the current event), and invocations in the keep-alive window after t - 24h."""
     a = np.flatnonzero(c > 0)
     if len(a) == 0:
         return None
@@ -55,18 +58,26 @@ def function_events(c, keepalive):
         np.log1p(since_cold) / np.log1p(CAP),
         np.log1p(consec),
     ], 1).astype(np.float32)
+    if daily:
+        y0 = a - 1440
+        nxt = a[np.minimum(np.searchsorted(a, y0, side="right"), len(a) - 1)]
+        gap_y = np.where(y0 >= 0, nxt - y0, CAP)                 # <= 1440 when yesterday exists
+        lo, hi = np.clip(y0 + 1, 0, len(c)), np.clip(y0 + 1 + keepalive, 0, len(c))
+        win_y = np.where(y0 >= 0, ccs[hi] - ccs[lo], 0)
+        feats = np.concatenate([feats, np.stack([np.log1p(gap_y) / np.log1p(CAP),
+                                                 np.log1p(win_y)], 1).astype(np.float32)], 1)
     return {"t": a, "gap": gap, "cold": cold, "feats": feats}
 
 
 class EventStore:
     """All events of all functions concatenated, plus per-event static features."""
 
-    def __init__(self, counts, trigger, duration_ms, mem_mb, keepalive, n_triggers):
+    def __init__(self, counts, trigger, duration_ms, mem_mb, keepalive, n_triggers, daily=False):
         F, T, G, Y, FN, START = [], [], [], [], [], []
         eye = np.eye(n_triggers, dtype=np.float32)
         offset = 0
         for f in range(counts.shape[0]):
-            ev = function_events(counts[f], keepalive)
+            ev = function_events(counts[f], keepalive, daily)
             if ev is None:
                 continue
             m = len(ev["t"])

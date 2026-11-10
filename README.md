@@ -87,12 +87,49 @@ Train days 2-7 (400k invocations), validate day 8, test days 9-10 (395k invocati
 
 ![warm-rate](docs/figures/warm_rate.png)
 
+### C. Improved model (v2): early stopping, LR schedule, daily features, 3 seeds
+
+Changes: early stopping (patience 3), learning rate halved on plateau, and two "same time
+yesterday" features (minutes to the next call after t-24h, calls in the 10 min after t-24h).
+
+**Ablation** (ABiGRU, 100k training invocations, seed 0, time-split test):
+
+| Config | F1 | MCC | Bal. acc | Reduction |
+|---|---|---|---|---|
+| seq 16 | 0.7881 | 0.7893 | 0.8415 | 61.14% |
+| seq 32 | 0.7864 | 0.7882 | 0.8395 | 60.83% |
+| **seq 16 + daily** | **0.7908** | **0.7915** | **0.8442** | **61.66%** |
+| seq 32 + daily | 0.7879 | 0.7892 | 0.8412 | 61.25% |
+| seq 64 + daily | 0.7854 | 0.7873 | 0.8387 | 60.91% |
+| seq 32 + daily, 2 layers | 0.7825 | 0.7857 | 0.8349 | 60.34% |
+
+Daily features help slightly; longer histories and a deeper model do not.
+
+**Final run** (seq 16 + daily, 400k training invocations, seeds 0/1/2, mean ± std):
+
+| Model | F1 | MCC | AUC | Bal. acc | Warmer reduction | Warm memory (GB-h) |
+|---|---|---|---|---|---|---|
+| ABiGRU v2 | 0.8241 ± 0.0003 | 0.8199 ± 0.0006 | 0.9937 | 0.8777 ± 0.0029 | 66.82 ± 0.54% | 2,383 |
+| **LSTM** | **0.8290 ± 0.0025** | **0.8237 ± 0.0020** | **0.9939** | 0.8858 ± 0.0039 | 68.04 ± 0.46% | 2,403 |
+| Logistic regression | 0.8233 | 0.8160 | 0.9931 | **0.8940** | **69.30%** | 2,421 |
+| Gradient boosting | 0.8234 ± 0.0078 | 0.8170 ± 0.0086 | 0.9932 | 0.8881 ± 0.0011 | 68.66 ± 0.21% | 2,402 |
+| "previous call was cold" | 0.7408 | 0.7286 | 0.8642 | 0.8641 | 64.98% | 2,385 |
+
+Compared with v1 ABiGRU (single seed), v2 improves F1 (0.8211 → 0.8241) and MCC (0.8138 → 0.8199)
+and is very stable across seeds, but predicts cold starts more conservatively (reduction 69.2% →
+66.8%, less extra memory). Cold starts avoided per extra GB-hour of warm memory are essentially
+equal for all learned models (~15.8), so the differences in reduction come from where each model's
+0.5 threshold lands rather than better prediction.
+
 ### Takeaways
 - Under the paper's protocol we exceed its reported numbers (95.8 vs 90.4 accuracy, 91.8 vs 82.3 MCC),
   but every model, including logistic regression, lands within ~1 point: the paper's features
   (cold-start history, idle gap) make the balanced task easy.
 - Under the realistic protocol ABiGRU gives the best warmer (69.2% fewer cold starts) and the best
   balanced accuracy/MCC, but its margin over LSTM and gradient boosting is small (1-2 points).
+- With 3 seeds (section C), the gaps between ABiGRU, LSTM, gradient boosting and logistic regression
+  are below 1 F1 point; LSTM is marginally the best classifier and ABiGRU the most stable. On this
+  trace, attention and bidirectionality do not add measurable value over the paper's features.
 - The paper's latency figure is not reproduced: the Azure trace has no cold-start latency.
 
 All tables: `docs/results/*.csv`.

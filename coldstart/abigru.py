@@ -37,15 +37,18 @@ class RNNClassifier(nn.Module):
 
 
 def train_model(model, store, tr_idx, va_idx, seq_len, epochs, lr, batch_size=1024, log=print, tag="",
-                history=None, log_every=1):
+                history=None, log_every=1, patience=None, lr_schedule=False):
     """RMSProp training; keeps the checkpoint with the best validation loss.
 
+    patience: stop after this many epochs without validation improvement (None = never).
+    lr_schedule: halve the learning rate when validation loss plateaus for one epoch.
     If `history` is a list, per-epoch train/val loss and accuracy are appended to it.
     """
     opt = torch.optim.RMSprop(model.parameters(), lr=lr)
+    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=1) if lr_schedule else None
     loss_fn = nn.BCEWithLogitsLoss()
     yv = torch.from_numpy(store.y[va_idx])
-    best, best_state = float("inf"), None
+    best, best_state, stale = float("inf"), None, 0
     for ep in range(epochs):
         model.train()
         perm = np.random.permutation(tr_idx)
@@ -70,8 +73,15 @@ def train_model(model, store, tr_idx, va_idx, seq_len, epochs, lr, batch_size=10
                             "train_acc": correct / len(perm), "val_acc": vacc})
         if (ep + 1) % log_every == 0 or ep == epochs - 1:
             log(f"[{tag}] epoch {ep + 1}/{epochs} train_loss={tot / len(perm):.4f} val_loss={vloss:.4f} val_acc={vacc:.4f}")
+        if sched is not None:
+            sched.step(vloss)
         if vloss < best:
-            best, best_state = vloss, {k: v.clone() for k, v in model.state_dict().items()}
+            best, best_state, stale = vloss, {k: v.clone() for k, v in model.state_dict().items()}, 0
+        else:
+            stale += 1
+            if patience is not None and stale >= patience:
+                log(f"[{tag}] early stop at epoch {ep + 1} (best val_loss={best:.4f})")
+                break
     model.load_state_dict(best_state)
     return model, best
 

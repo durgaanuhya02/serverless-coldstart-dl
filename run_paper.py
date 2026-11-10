@@ -1,6 +1,12 @@
-"""Paper replication: ABiGRU cold-start prediction (ODL-CSP) + function-warmer provisioning.
+"""Realistic time-split replication: ABiGRU cold-start prediction (ODL-CSP) + function warmer.
 
-Usage:  python run_paper.py [--epochs 5] [--tune] [--functions 1000]
+Train days 2-7, validate day 8, test days 9-10, natural cold-start rate. Every option is a flag so
+the same script runs ablations and the final multi-seed experiment.
+
+Examples:
+  python run_paper.py --tune                                   # original setup (v1)
+  python run_paper.py --seq-len 32 --daily --patience 3 --lr-schedule --seeds 0 1 2 --tag v2
+  python run_paper.py --models ABiGRU --no-classic --max-train 100000 --tag abl_seq32 --seq-len 32
 """
 import argparse
 import json
@@ -21,10 +27,8 @@ from coldstart.events import EventStore
 
 KEEPALIVE = 10        # platform default idle timeout that defines ground-truth cold starts (min)
 WARMER_KEEPALIVE = 60 # how long the warmer keeps a function provisioned when it predicts a cold start
-SEQ_LEN = 16          # past invocation events fed to the RNN
-N_TRAIN = 400_000     # cap on training invocations (override with --max-train)
 
-VARIANTS = {          # name -> RNNClassifier kwargs
+VARIANTS = {
     "ABiGRU": dict(cell="gru", bidirectional=True, attention=True),
     "BiGRU": dict(cell="gru", bidirectional=True, attention=False),
     "GRU": dict(cell="gru", bidirectional=False, attention=False),
@@ -37,9 +41,7 @@ def metrics(y, p, thr=0.5):
     return {
         "accuracy": accuracy_score(y, yh), "precision": precision_score(y, yh, zero_division=0),
         "recall": recall_score(y, yh), "f1": f1_score(y, yh), "mcc": matthews_corrcoef(y, yh),
-        "precision_macro": precision_score(y, yh, average="macro", zero_division=0),
-        "recall_macro": recall_score(y, yh, average="macro"),
-        "f1_macro": f1_score(y, yh, average="macro"), "auc": roc_auc_score(y, p), "threshold": thr,
+        "f1_macro": f1_score(y, yh, average="macro"), "auc": roc_auc_score(y, p),
     }
 
 
@@ -49,12 +51,12 @@ def best_f1_threshold(y, p):
 
 
 def warmer_sim(store, idx, p, thr, keepalive=KEEPALIVE, extended=WARMER_KEEPALIVE):
-    """Function warmer: after invocation i-1, if P(next is cold) >= thr keep the function
-    provisioned for `extended` minutes instead of the default `keepalive`."""
+    """After invocation i-1, if P(next is cold) >= thr keep the function provisioned for
+    `extended` minutes instead of the default `keepalive`."""
     gap = store.gap[idx]
     window = np.where(p >= thr, extended, keepalive)
     cold = gap > window
-    idle = np.minimum(gap - 1, window)               # warm-but-unused minutes before the next call
+    idle = np.minimum(gap - 1, window)
     return {"cold_starts": int(cold.sum()), "cold_rate_%": 100 * cold.mean(),
             "wasted_GB_hours": float((idle * store.mem[idx]).sum() / 1024 / 60)}
 
@@ -63,104 +65,110 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=5)
     ap.add_argument("--functions", type=int, default=None)
-    ap.add_argument("--tune", action="store_true", help="grid-search lr/hidden for ABiGRU (RMSProp)")
-    ap.add_argument("--max-train", type=int, default=N_TRAIN)
+    ap.add_argument("--max-train", type=int, default=400_000)
+    ap.add_argument("--seq-len", type=int, default=16)
+    ap.add_argument("--hidden", type=int, default=64)
+    ap.add_argument("--layers", type=int, default=1)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--daily", action="store_true", help="add same-time-yesterday features")
+    ap.add_argument("--patience", type=int, default=None, help="early-stopping patience (epochs)")
+    ap.add_argument("--lr-schedule", action="store_true")
+    ap.add_argument("--seeds", type=int, nargs="+", default=[0])
+    ap.add_argument("--models", default="ABiGRU,BiGRU,GRU,LSTM")
+    ap.add_argument("--no-classic", action="store_true", help="skip LogReg/GBM/PrevCold")
+    ap.add_argument("--tune", action="store_true", help="grid-search lr/hidden for ABiGRU first")
+    ap.add_argument("--tag", default="v1")
     args = ap.parse_args()
     cfg = Config()
     if args.functions: cfg.n_functions = args.functions
-    torch.manual_seed(cfg.seed); np.random.seed(cfg.seed)
     t0 = time.time()
-    out = cfg.out_dir / "paper"
+    out = cfg.out_dir / "paper" / args.tag
     out.mkdir(parents=True, exist_ok=True)
 
     data = build_cache(cfg)
     store = EventStore(data["counts"], data["trigger"], load_durations(cfg), data["mem_mb"],
-                       KEEPALIVE, len(cfg.triggers))
+                       KEEPALIVE, len(cfg.triggers), daily=args.daily)
     tr = store.targets_in(cfg.day_range(cfg.train_days))
     va = store.targets_in(cfg.day_range(cfg.val_days))
     te = store.targets_in(cfg.day_range(cfg.test_days))
-    store.standardize(np.flatnonzero(store.t < cfg.day_range(cfg.train_days)[1]))  # train-period stats only
-    rng = np.random.default_rng(cfg.seed)
+    store.standardize(np.flatnonzero(store.t < cfg.day_range(cfg.train_days)[1]))
+    rng = np.random.default_rng(cfg.seed)                 # data sampling fixed across seeds
     if len(tr) > args.max_train:
         tr = np.sort(rng.choice(tr, args.max_train, replace=False))
     for name, ix in (("train", tr), ("val", va), ("test", te)):
         print(f"[events] {name}: {len(ix):,} invocations, cold-start rate {store.y[ix].mean():.3f}")
+    S = args.seq_len
+    yte, yva = store.y[te], store.y[va]
 
-    lr, hidden = 1e-3, 64
-    tuning = []
+    lr, hidden, tuning = args.lr, args.hidden, []
     if args.tune:
         sub_tr = rng.choice(tr, min(100_000, len(tr)), replace=False)
         sub_va = rng.choice(va, min(50_000, len(va)), replace=False)
         for lr_ in (3e-4, 1e-3, 3e-3):
             for h_ in (32, 64, 128):
                 torch.manual_seed(cfg.seed)
-                m = RNNClassifier(store.dim, h_, **VARIANTS["ABiGRU"])
-                _, vloss = train_model(m, store, sub_tr, sub_va, SEQ_LEN, 2, lr_, tag=f"tune lr={lr_} h={h_}")
+                m = RNNClassifier(store.dim, h_, args.layers, **VARIANTS["ABiGRU"])
+                _, vloss = train_model(m, store, sub_tr, sub_va, S, 2, lr_, tag=f"tune lr={lr_} h={h_}")
                 tuning.append({"lr": lr_, "hidden": h_, "val_loss": vloss})
         best = min(tuning, key=lambda r: r["val_loss"])
         lr, hidden = best["lr"], best["hidden"]
         print(f"[tune] best lr={lr} hidden={hidden}")
 
-    results, test_probs, val_probs = {}, {}, {}
-    for name, kw in VARIANTS.items():
-        torch.manual_seed(cfg.seed)
-        m = RNNClassifier(store.dim, hidden, **kw)
-        m, _ = train_model(m, store, tr, va, SEQ_LEN, args.epochs, lr, tag=name)
-        val_probs[name] = predict(m, store, va, SEQ_LEN)
-        test_probs[name] = predict(m, store, te, SEQ_LEN)
-        if name == "ABiGRU":
-            torch.save(m.state_dict(), out / "abigru.pt")
-
-    print("[baselines] logistic regression + gradient boosting ...")
-    Xtr, Xva, Xte = (store.tabular(ix, SEQ_LEN) for ix in (tr, va, te))
-    for name, clf in (("LogReg", LogisticRegression(max_iter=500)),
-                      ("GBM", HistGradientBoostingClassifier(max_iter=300, random_state=cfg.seed))):
-        clf.fit(Xtr, store.y[tr])
-        val_probs[name] = clf.predict_proba(Xva)[:, 1]
-        test_probs[name] = clf.predict_proba(Xte)[:, 1]
-
-    # Naive rule: "next call is cold if the previous one was cold"
-    prev_cold = lambda ix: store.y[ix - 1].astype(np.float64)
-    val_probs["PrevCold"], test_probs["PrevCold"] = prev_cold(va), prev_cold(te)
-
-    rows, sim_rows = [], []
-    yte = store.y[te]
-    base = warmer_sim(store, te, np.zeros(len(te)), 1.0)
-    sim_rows.append({"policy": f"keep-alive {KEEPALIVE} min (no warmer)", **base})
-    sim_rows.append({"policy": f"keep-alive {WARMER_KEEPALIVE} min for all",
-                     **warmer_sim(store, te, np.ones(len(te)), 0.5)})
-    useful = ((store.gap[te] > KEEPALIVE) & (store.gap[te] <= WARMER_KEEPALIVE)).astype(float)
-    sim_rows.append({"policy": "oracle warmer (extends only when it helps)", **warmer_sim(store, te, useful, 0.5)})
-    # Balanced test subset (all cold starts + equal number of random warm starts), comparable to the paper.
+    # balanced test subset (all cold + equal random warm), comparable to the paper
     pos = np.flatnonzero(yte == 1)
-    neg = rng.choice(np.flatnonzero(yte == 0), len(pos), replace=False)
-    bal = np.concatenate([pos, neg])
-    for name in test_probs:
-        thr_f1 = best_f1_threshold(store.y[va], val_probs[name])
-        rows.append({"model": name, "thr": "0.5", **metrics(yte, test_probs[name], 0.5)})
-        rows.append({"model": name, "thr": f"val-F1 ({thr_f1:.2f})", **metrics(yte, test_probs[name], thr_f1)})
-        rows.append({"model": name, "thr": "0.5 balanced", **metrics(yte[bal], test_probs[name][bal], 0.5)})
-        s = warmer_sim(store, te, test_probs[name], 0.5)
-        s["cold_start_reduction_%"] = 100 * (1 - s["cold_starts"] / base["cold_starts"])
-        sim_rows.append({"policy": f"{name} warmer (p>=0.5)", **s})
+    bal = np.concatenate([pos, rng.choice(np.flatnonzero(yte == 0), len(pos), replace=False)])
+    base = warmer_sim(store, te, np.zeros(len(te)), 1.0)
 
-    clf_df = pd.DataFrame(rows)
-    sim_df = pd.DataFrame(sim_rows)
-    clf_df.to_csv(out / "classification_test.csv", index=False)
-    sim_df.to_csv(out / "warmer_test.csv", index=False)
-    (out / "report.json").write_text(json.dumps({
-        "keepalive": KEEPALIVE, "warmer_keepalive": WARMER_KEEPALIVE, "seq_len": SEQ_LEN,
-        "lr": lr, "hidden": hidden, "epochs": args.epochs, "tuning": tuning,
-        "n_events": {"train": len(tr), "val": len(va), "test": len(te)},
-        "classification": rows, "warmer": sim_rows}, indent=2, default=float))
+    rows = []
+    def record(seed, name, p_va, p_te):
+        thr = best_f1_threshold(yva, p_va)
+        s = warmer_sim(store, te, p_te, 0.5)
+        rows.append({"seed": seed, "model": name, **metrics(yte, p_te),
+                     **{f"bal_{k}": v for k, v in metrics(yte[bal], p_te[bal]).items() if k in ("accuracy", "f1", "mcc")},
+                     "f1_valthr": f1_score(yte, p_te >= thr), "valthr": thr,
+                     "warm_cold_starts": s["cold_starts"], "warm_GB_hours": s["wasted_GB_hours"],
+                     "reduction_%": 100 * (1 - s["cold_starts"] / base["cold_starts"])})
+        r = rows[-1]
+        print(f"[result] seed={seed} {name}: F1={r['f1']:.4f} MCC={r['mcc']:.4f} bal_acc={r['bal_accuracy']:.4f} "
+              f"reduction={r['reduction_%']:.2f}%")
+
+    for seed in args.seeds:
+        for name in args.models.split(","):
+            torch.manual_seed(seed); np.random.seed(seed)
+            m = RNNClassifier(store.dim, hidden, args.layers, **VARIANTS[name])
+            m, _ = train_model(m, store, tr, va, S, args.epochs, lr, tag=f"{name} s{seed}",
+                               patience=args.patience, lr_schedule=args.lr_schedule)
+            record(seed, name, predict(m, store, va, S), predict(m, store, te, S))
+            if name == "ABiGRU" and seed == args.seeds[0]:
+                torch.save(m.state_dict(), out / "abigru.pt")
+        if not args.no_classic:
+            Xtr, Xva, Xte = (store.tabular(ix, S) for ix in (tr, va, te))
+            for name, clf in (("LogReg", LogisticRegression(max_iter=500)),
+                              ("GBM", HistGradientBoostingClassifier(max_iter=300, random_state=seed))):
+                clf.fit(Xtr, store.y[tr])
+                record(seed, name, clf.predict_proba(Xva)[:, 1], clf.predict_proba(Xte)[:, 1])
+            record(seed, "PrevCold", store.y[va - 1].astype(float), store.y[te - 1].astype(float))
+
+    df = pd.DataFrame(rows)
+    df.to_csv(out / "runs.csv", index=False)
+    num = df.drop(columns=["seed"]).groupby("model", sort=False)
+    summary = num.mean().add_suffix("_mean").join(num.std().add_suffix("_std"))
+    summary.to_csv(out / "summary.csv")
+    useful = ((store.gap[te] > KEEPALIVE) & (store.gap[te] <= WARMER_KEEPALIVE)).astype(float)
+    refs = {"keepalive_10": base, "keepalive_60_all": warmer_sim(store, te, np.ones(len(te)), 0.5),
+            "oracle": warmer_sim(store, te, useful, 0.5)}
+    (out / "report.json").write_text(json.dumps({"args": vars(args), "lr": lr, "hidden": hidden,
+                                                 "tuning": tuning, "references": refs}, indent=2, default=float))
 
     pd.set_option("display.width", 220)
-    cols = ["model", "thr", "accuracy", "precision", "recall", "f1", "mcc", "f1_macro", "auc"]
-    print("\n=== TEST classification (paper: Acc 90.36  Prec 91.87  Rec 90.42  F1 90.28  MCC 82.28) ===")
-    print((clf_df[cols].set_index(["model", "thr"]) * 100).round(2).to_string())
-    print("\n=== TEST function-warmer simulation ===")
-    print(sim_df.round(3).to_string(index=False))
-    print(f"\n[done] {time.time() - t0:.0f}s -> {out}")
+    cols = ["f1", "mcc", "auc", "bal_accuracy", "bal_mcc", "f1_valthr", "reduction_%", "warm_GB_hours"]
+    show = pd.DataFrame({c: [f"{a:.4f} +/- {b:.4f}" if c not in ("reduction_%", "warm_GB_hours") else f"{a:.2f} +/- {b:.2f}"
+                             for a, b in zip(summary[f"{c}_mean"], summary[f"{c}_std"].fillna(0))]
+                         for c in cols}, index=summary.index)
+    print(f"\n=== TEST ({args.tag}, seeds={args.seeds}) mean +/- std ===")
+    print(show.to_string())
+    print("references:", json.dumps(refs, default=float))
+    print(f"[done] {time.time() - t0:.0f}s -> {out}")
 
 
 if __name__ == "__main__":
