@@ -28,7 +28,81 @@ Differences from the paper to keep in mind:
 - Only ~4.5% of invocations are cold in this trace, so accuracy is high by default. MCC/F1 and the
   balanced-subset numbers are the fair comparison with the paper.
 
+## Results
+
+1,000 random Azure functions, 10 days, seed 42. Ground-truth cold start = idle > 10 min.
+
+### A. Paper protocol (`run_paper_protocol.py`)
+Reconstructed from the paper's confusion matrix ([[1242, 0], [241, 1017]] reproduces its five
+numbers exactly): 10,000 balanced invocations, stratified 75/25 split (7,500 / 2,500), macro
+metrics, RMSProp (lr 1e-3, hidden 64, batch 64), 100 epochs, best-validation-loss checkpoint.
+
+| Model (test) | Accuracy | Precision | Recall | F1 | MCC |
+|---|---|---|---|---|---|
+| **ABiGRU (ours)** | **95.84** | **95.92** | **95.84** | **95.84** | **91.76** |
+| BiGRU | 96.16 | 96.17 | 96.16 | 96.16 | 92.33 |
+| GRU | 95.92 | 95.97 | 95.92 | 95.92 | 91.89 |
+| LSTM | 96.00 | 96.03 | 96.00 | 96.00 | 92.03 |
+| KNN | 95.56 | 95.57 | 95.56 | 95.56 | 91.13 |
+| Logistic regression | 96.20 | 96.22 | 96.20 | 96.20 | 92.42 |
+| Gradient boosting | 96.00 | 96.03 | 96.00 | 96.00 | 92.03 |
+| ODL-CSP (paper, AWS data) | 90.36 | 91.87 | 90.42 | 90.28 | 82.28 |
+
+ABiGRU test confusion matrix (actual Cold/Warm x predicted Cold/Warm): [[1224, 26], [78, 1172]].
+
+![comparison](docs/figures/comparison.png)
+![confusion](docs/figures/cm_test.png) ![pr-roc](docs/figures/pr_roc_test.png)
+![curves](docs/figures/train_curves.png)
+
+**Overfitting:** with only 6,750 training samples, validation loss is lowest around epochs 5-15
+and rises afterwards; the reported model is the best-validation checkpoint (the paper's own
+validation curve is similarly unstable). Early stopping is recommended.
+
+### B. Realistic time-split protocol (`run_paper.py --tune`)
+Train days 2-7 (400k invocations), validate day 8, test days 9-10 (395k invocations, natural
+4.5% cold-start rate). RMSProp grid search picked lr 1e-3, hidden 64. Positive class = cold.
+
+| Model | Acc | Prec | Rec | F1 | MCC | AUC | Bal. Acc* | Bal. MCC* |
+|---|---|---|---|---|---|---|---|---|
+| **ABiGRU** | 98.47 | 85.65 | 78.84 | **82.11** | 81.38 | 99.32 | **89.10** | **79.91** |
+| BiGRU | 98.48 | 90.86 | 73.30 | 81.14 | 80.86 | 99.32 | 86.46 | 75.59 |
+| GRU | 98.49 | 89.74 | 74.78 | 81.58 | 81.17 | 99.32 | 87.17 | 76.72 |
+| LSTM | 98.51 | 88.52 | 76.52 | 82.09 | **81.55** | 99.34 | 88.01 | 78.10 |
+| Logistic regression | 98.43 | 86.34 | 77.03 | 81.42 | 80.75 | 99.26 | 88.22 | 78.42 |
+| Gradient boosting | 98.50 | 87.86 | 77.09 | **82.12** | 81.53 | 99.31 | 88.30 | 78.61 |
+| "previous call was cold" | 97.69 | 74.10 | 74.05 | 74.08 | 72.86 | 86.42 | 86.39 | 75.10 |
+
+\* balanced subset of the test set (all cold + equal random warm), threshold 0.5.
+
+**Function warmer** (provision 60 min instead of 10 when a cold start is predicted, test days):
+
+| Policy | Cold starts | Cold-start rate | Reduction | Warm memory (GB-h) |
+|---|---|---|---|---|
+| Keep-alive 10 min (no warmer) | 17,652 | 4.46% | - | 1,641 |
+| **ABiGRU warmer** | **5,435** | **1.37%** | **69.2%** | 2,408 |
+| LSTM warmer | 5,701 | 1.44% | 67.7% | 2,378 |
+| Gradient-boosting warmer | 5,663 | 1.43% | 67.9% | 2,387 |
+| Keep-alive 60 min for every function | 2,389 | 0.60% | 86.5% | 2,601 |
+| Oracle warmer (upper bound) | 2,389 | 0.60% | 86.5% | 2,286 |
+
+![warm-rate](docs/figures/warm_rate.png)
+
+### Takeaways
+- Under the paper's protocol we exceed its reported numbers (95.8 vs 90.4 accuracy, 91.8 vs 82.3 MCC),
+  but every model, including logistic regression, lands within ~1 point: the paper's features
+  (cold-start history, idle gap) make the balanced task easy.
+- Under the realistic protocol ABiGRU gives the best warmer (69.2% fewer cold starts) and the best
+  balanced accuracy/MCC, but its margin over LSTM and gradient boosting is small (1-2 points).
+- The paper's latency figure is not reproduced: the Azure trace has no cold-start latency.
+
+All tables: `docs/results/*.csv`.
+
 ## Earlier exploratory pipeline (`run_pipeline.py`): minute-level forecasting
+
+Result (test days, thresholds picked on validation within the 10-min keep-alive memory budget):
+LSTM cuts the cold-start rate from 4.46% to 0.60%, gradient boosting to 0.49%, and the
+hybrid-histogram policy to 0.52% (`docs/results/minute_level_summary.csv`,
+`docs/figures/minute_level_tradeoff.png`).
 
 ## Finalized idea
 
