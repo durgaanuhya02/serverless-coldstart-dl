@@ -1,11 +1,9 @@
 # Cold-Start Prediction & Provisioning Optimization (Azure Functions 2019)
 
-Replication of *"Cold Start Prediction and Provisioning Optimization in Serverless Computing Using
-Deep Learning"* (ODL-CSP), on the public Azure Functions 2019 trace instead of the paper's AWS Lambda data.
+
 
 ## Main pipeline: paper replication (`run_paper.py`)
 
-Built from the paper's abstract (the methods section is still to be cross-checked):
 
 | Paper | This implementation |
 |---|---|
@@ -22,11 +20,6 @@ Baselines: BiGRU (no attention), GRU, LSTM, logistic regression, gradient boosti
 python run_paper.py --tune --epochs 5      # outputs/paper/{classification_test,warmer_test}.csv, report.json
 ```
 
-Differences from the paper to keep in mind:
-- Azure trace has per-minute counts, so an "invocation" is an active minute; cold starts are derived
-  from the keep-alive rule, not measured.
-- Only ~4.5% of invocations are cold in this trace, so accuracy is high by default. MCC/F1 and the
-  balanced-subset numbers are the fair comparison with the paper.
 
 ## Results
 
@@ -121,18 +114,7 @@ and is very stable across seeds, but predicts cold starts more conservatively (r
 equal for all learned models (~15.8), so the differences in reduction come from where each model's
 0.5 threshold lands rather than better prediction.
 
-### Takeaways
-- Under the paper's protocol we exceed its reported numbers (95.8 vs 90.4 accuracy, 91.8 vs 82.3 MCC),
-  but every model, including logistic regression, lands within ~1 point: the paper's features
-  (cold-start history, idle gap) make the balanced task easy.
-- Under the realistic protocol ABiGRU gives the best warmer (69.2% fewer cold starts) and the best
-  balanced accuracy/MCC, but its margin over LSTM and gradient boosting is small (1-2 points).
-- With 3 seeds (section C), the gaps between ABiGRU, LSTM, gradient boosting and logistic regression
-  are below 1 F1 point; LSTM is marginally the best classifier and ABiGRU the most stable. On this
-  trace, attention and bidirectionality do not add measurable value over the paper's features.
-- The paper's latency figure is not reproduced: the Azure trace has no cold-start latency.
-
-All tables: `docs/results/*.csv`.
+`.
 
 ## Earlier exploratory pipeline (`run_pipeline.py`): minute-level forecasting
 
