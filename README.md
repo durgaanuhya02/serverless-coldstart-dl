@@ -2,7 +2,6 @@
 
 
 
-## Main pipeline: paper replication (`run_paper.py`)
 
 
 | Paper | This implementation |
